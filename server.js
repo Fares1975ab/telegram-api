@@ -32,6 +32,13 @@ if (!BOT_TOKEN || !TARGET_GROUP_ID) {
 console.log('✅ الخادم يعمل مع المجموعة:', TARGET_GROUP_ID);
 
 // ==========================================
+// الصفحة الرئيسية - GET
+// ==========================================
+app.get('/', (req, res) => {
+    res.send('✅ خادم منصة الأستاذ فارس يعمل!<br>استخدم POST /api/verify-access للتحقق من العضوية');
+});
+
+// ==========================================
 // دالة التحقق من توقيع Telegram WebApp
 // ==========================================
 function verifyTelegramWebAppData(telegramInitData) {
@@ -51,7 +58,7 @@ function verifyTelegramWebAppData(telegramInitData) {
 }
 
 // ==========================================
-// API التحقق من العضوية
+// API التحقق من العضوية - POST
 // ==========================================
 app.post('/api/verify-access', async (req, res) => {
     const { initData } = req.body;
@@ -114,17 +121,6 @@ app.post('/api/verify-access', async (req, res) => {
         
         return res.status(500).json({ error: 'خطأ في الخادم' });
     }
-});
-
-// ==========================================
-// صفحة التحقق من حالة الخادم
-// ==========================================
-app.get('/', (req, res) => {
-    res.json({
-        status: 'online',
-        message: 'خادم منصة الأستاذ فارس يعمل',
-        group: TARGET_GROUP_ID
-    });
 });
 
 // ==========================================
