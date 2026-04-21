@@ -1,70 +1,137 @@
 const express = require('express');
-const path = require('path');
 const crypto = require('crypto');
+const axios = require('axios');
+const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// تخزين التوكنز
-const activeTokens = new Set();
-
-// مسار المجلد الذي يحتوي على ملفاتك (مجلد public الموجود في الصورة)
-const publicDir = path.join(__dirname, 'public');
 
 // ==========================================
-// 1. المسارات المفتوحة (التي يجب أن يصل إليها الطالب بدون توكن)
+// إعدادات CORS - السماح بالاتصال من أي مصدر
 // ==========================================
-app.get('/', (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
-app.get('/web-content.json', (req, res) => res.sendFile(path.join(publicDir, 'web-content.json')));
-app.get('/database.js', (req, res) => res.sendFile(path.join(publicDir, 'database.js')));
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type']
+}));
 
-// السماح بفتح الصور بشكل طبيعي (إذا لم تكن تريد تشفير الصور)
-app.use('/image', express.static(path.join(publicDir, 'image')));
-app.use('/images', express.static(path.join(publicDir, 'images')));
-
+app.use(express.json());
 
 // ==========================================
-// 2. مسار توليد التوكن (للـ Iframe)
+// قراءة الإعدادات من متغيرات البيئة
 // ==========================================
-app.get('/api/get-token', (req, res) => {
-    const token = crypto.randomBytes(16).toString('hex');
-    activeTokens.add(token);
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const TARGET_GROUP_ID = process.env.TARGET_GROUP_ID;
+
+// التحقق من وجود الإعدادات
+if (!BOT_TOKEN || !TARGET_GROUP_ID) {
+    console.error('❌ خطأ: BOT_TOKEN أو TARGET_GROUP_ID غير موجود في .env');
+    process.exit(1);
+}
+
+console.log('✅ الخادم يعمل مع المجموعة:', TARGET_GROUP_ID);
+
+// ==========================================
+// دالة التحقق من توقيع Telegram WebApp
+// ==========================================
+function verifyTelegramWebAppData(telegramInitData) {
+    if (!telegramInitData) return false;
     
-    // التوكن يختفي بعد 10 دقائق
-    setTimeout(() => activeTokens.delete(token), 10 * 60 * 1000);
-    res.json({ token });
+    const urlParams = new URLSearchParams(telegramInitData);
+    const hash = urlParams.get('hash');
+    urlParams.delete('hash');
+    
+    const keys = Array.from(urlParams.keys()).sort();
+    const dataCheckString = keys.map(key => `${key}=${urlParams.get(key)}`).join('\n');
+    
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    
+    return calculatedHash === hash;
+}
+
+// ==========================================
+// API التحقق من العضوية
+// ==========================================
+app.post('/api/verify-access', async (req, res) => {
+    const { initData } = req.body;
+    
+    // 1. التحقق من صحة البيانات
+    if (!initData) {
+        return res.status(400).json({ error: 'بيانات مفقودة' });
+    }
+    
+    if (!verifyTelegramWebAppData(initData)) {
+        return res.status(401).json({ error: 'بيانات غير صالحة' });
+    }
+    
+    try {
+        // 2. استخراج معرف المستخدم
+        const urlParams = new URLSearchParams(initData);
+        const userData = JSON.parse(urlParams.get('user'));
+        const userId = userData.id;
+        
+        console.log('🔍 التحقق من المستخدم:', userId);
+        
+        // 3. التحقق من عضوية المستخدم في المجموعة
+        const response = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getChatMember`, {
+            params: {
+                chat_id: TARGET_GROUP_ID,
+                user_id: userId
+            },
+            timeout: 10000 // مهلة 10 ثواني
+        });
+        
+        const status = response.data.result?.status;
+        console.log('📊 حالة العضوية:', status);
+        
+        // 4. التحقق من الحالة
+        const allowedStatuses = ['member', 'administrator', 'creator'];
+        
+        if (allowedStatuses.includes(status)) {
+            return res.json({
+                success: true,
+                user: {
+                    id: userData.id,
+                    firstName: userData.first_name,
+                    lastName: userData.last_name,
+                    username: userData.username
+                }
+            });
+        } else {
+            return res.status(403).json({
+                error: 'لست عضواً في المجموعة',
+                status: status
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ خطأ:', error.message);
+        
+        if (error.response?.data?.error_code === 400) {
+            return res.status(404).json({ error: 'المستخدم غير موجود في المجموعة' });
+        }
+        
+        return res.status(500).json({ error: 'خطأ في الخادم' });
+    }
 });
 
+// ==========================================
+// صفحة التحقق من حالة الخادم
+// ==========================================
+app.get('/', (req, res) => {
+    res.json({
+        status: 'online',
+        message: 'خادم منصة الأستاذ فارس يعمل',
+        group: TARGET_GROUP_ID
+    });
+});
 
 // ==========================================
-// 3. نظام الحماية (Middleware)
+// تشغيل الخادم
 // ==========================================
-const iframeProtection = (req, res, next) => {
-    const { token } = req.query;
-    const referer = req.headers.referer || req.headers.origin;
-
-    if (!token || !activeTokens.has(token)) {
-        return res.status(403).send('<h1 style="color:red; text-align:center;">Access Denied: Invalid Token ❌</h1>');
-    }
-
-    if (!referer || !referer.includes(req.get('host'))) {
-        return res.status(403).send('<h1 style="color:red; text-align:center;">Access Denied: Direct Access Not Allowed ❌</h1>');
-    }
-
-    next();
-};
-
-
-// ==========================================
-// 4. حماية مجلدات الدروس (السنة الأولى، الثانية، البكالوريا)
-// ==========================================
-// أي ملف داخل هذه المجلدات لن يفتح إلا إذا اجتاز اختبار iframeProtection
-app.use('/1as', iframeProtection, express.static(path.join(publicDir, '1as')));
-app.use('/2as', iframeProtection, express.static(path.join(publicDir, '2as')));
-app.use('/bacs', iframeProtection, express.static(path.join(publicDir, 'bacs')));
-
-
-// تشغيل السيرفر
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Server is running on http://localhost:${PORT}`);
+    console.log(`🚀 الخادم يعمل على المنفذ ${PORT}`);
+    console.log(`🔗 الرابط: http://localhost:${PORT}`);
 });
